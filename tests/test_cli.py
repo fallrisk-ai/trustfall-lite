@@ -207,8 +207,10 @@ class TestScanV2OllamaIntegration:
             main, ["scan", str(ollama_fixture), "--local-only"]
         )
         # Either exit 2 (no snapshot) or 0 (found nothing). Either way, output
-        # should mention discovering an Ollama group.
-        assert "ollama" in result.output.lower() or "test" in result.output.lower() or "Ollama" in result.output
+        # should report that a group was discovered. We assert on the discovery
+        # behavior (group count > 0), not on path-string content, because path
+        # rendering differs between POSIX and Windows.
+        assert "discovered 1 model group" in result.output.lower() or "discovered 1 model group(s)" in result.output.lower()
 
     def test_scan_json_includes_v2_schema_fields_for_ollama(
         self, runner, ollama_fixture, tmp_path, monkeypatch, mocker

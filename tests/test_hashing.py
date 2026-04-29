@@ -45,7 +45,12 @@ class TestHashFile:
         result = subprocess.run(
             ["sha256sum", str(f)], capture_output=True, text=True
         )
-        system = result.stdout.split()[0]
+        # GNU sha256sum prepends the line with a backslash when the filename
+        # contains a backslash or newline (its "escaped output" mode). On
+        # Windows runners, paths contain backslashes, so the leading "\\"
+        # appears and must be stripped before comparison. The hash itself is
+        # unchanged.
+        system = result.stdout.lstrip("\\").split()[0]
 
         assert ours == system
 
