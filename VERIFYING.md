@@ -15,7 +15,7 @@ what Trustfall Lite does not claim, see `LIMITATIONS.md`.
 
 ## What can be verified
 
-Trustfall Lite's claims reduce to four cryptographic statements:
+Trustfall Lite's claims reduce to five cryptographic statements:
 
 1. **The signing key is the one Fall Risk published.** The JWKS at
    `attest.fallrisk.ai/.well-known/jwks.json` contains the public key
@@ -25,16 +25,27 @@ Trustfall Lite's claims reduce to four cryptographic statements:
    JWS signatures and the manifest JWS in `registry.json` verify
    against the JWKS.
 
-3. **The registry record set has not been tampered with.** The
+3. **The registry record set matches the signed manifest.** The
    manifest digest commits to the canonical JSON of all decoded
    record payloads. Per-record JWS signatures verify the individual
-   signed records.
+   signed records. A modification to any field changes the digest or
+   breaks the per-record signature.
 
 4. **A specific artifact's hash is in the signed registry.** If
    Trustfall Lite says a hash is `verified`, that hash appears in a
    signed record under a stated model identifier.
 
-Everything else is downstream of these four. If they hold, the
+5. **The verification API is a faithful propagation of the static
+   authority.** The API at `api.attest.fallrisk.ai/v1/` does not
+   recompute or re-derive any signed value. Signed registry fields it
+   returns — including `registry_manifest_digest`, `record_jws`, and
+   `manifest_signature` — are propagated verbatim from the loaded
+   static registry. The API may add transport metadata such as
+   `registry_snapshot_at`, but it does not redefine registry identity.
+   Drift between the API and the static registry on any signed value
+   is a verification failure for the system.
+
+Everything else is downstream of these five. If they hold, the
 "verified" status means what it claims. If any of them fails, do not
 trust the tool's output for that scan.
 
@@ -53,6 +64,12 @@ For a minimal check, run these five steps in order:
    it matches the declared value (§4).
 5. **Query the API** for one known hash and confirm the returned
    `record_jws` byte-matches the local registry's signature (§6).
+
+For an additional cryptographic check that does not require fetching
+the static registry, query `/v1/registry/manifest_digest` and verify
+the returned JWS-signed `manifest_signature` against the published
+JWKS (§6.5). This is the most direct way to confirm the API is
+serving a registry snapshot signed by the canonical issuer.
 
 Each step takes seconds and is independently falsifiable. The sections
 below give the full commands, expected output, and discussion of edge
@@ -118,9 +135,9 @@ sha256:FlqonYOsEwXi5eaLuhjMKmHzbKxtM0MrM7yGg2xW-2M
 ```
 
 If a future version of this document changes that thumbprint without a
-documented key rotation, the document is wrong, the JWKS has been
-tampered with, or the key has been rotated. All three are situations a
-skeptical verifier should care about.
+documented key rotation, the document is wrong, the JWKS has changed,
+or the key has been rotated. All three are situations a skeptical
+verifier should care about.
 
 ---
 
@@ -183,14 +200,13 @@ else:
 EOF
 ```
 
-If the JWKS does not match, the registry is signed by a key that is
-not the publicly-published key. Every per-record signature in the
-registry will fail to verify against the published JWKS. This is the
-silent-fail mode that breaks verifiers without raising any obvious
-errors locally — the registry will look syntactically valid, but
-nothing in it will verify under the key a relying party would fetch.
-Do not trust a registry whose embedded JWKS does not semantically
-match the published JWKS.
+If the embedded JWKS does not match the published JWKS, the registry
+and the public trust anchor disagree. Do not proceed until the key-set
+mismatch is resolved. Always verify per-record signatures against the
+published JWKS, not merely against the embedded JWKS. The mismatch may
+indicate a partial key rotation, a stale embedded copy, or a registry
+served by a non-canonical issuer; in any of those cases the publicly-
+verifiable trust path is what determines whether records are trusted.
 
 ---
 
@@ -243,7 +259,7 @@ try:
     assert decoded == record, "Decoded JWS payload != record"
     print(f"  Decoded payload matches record exactly")
 except jwt.InvalidSignatureError:
-    print("Signature INVALID — record was tampered with")
+    print("Signature INVALID — record does not verify under the published key")
 EOF
 ```
 
@@ -290,8 +306,9 @@ EOF
 
 The tampering-detection model here is: a verifier always treats the
 signed JWS payload as authoritative, not the record stored alongside
-it. If those two ever disagree, the registry has been tampered with
-between signing and serving.
+it. If those two ever disagree, the registry's stored record has been
+modified after signing and the registry should be treated as
+unverified for that record.
 
 ---
 
@@ -301,6 +318,18 @@ The `manifest_digest` commits to the canonical JSON of all decoded
 record payloads. Per-record JWS signatures remain the authoritative
 signatures for individual records — the manifest digest does not
 include the signatures themselves, only the record dicts they sign.
+
+**Doctrine note.** A verifier recomputes the manifest digest from the
+records as a cross-check that the registry's record set matches the
+signed manifest. The Fall Risk verification API does **not** recompute
+this digest at request time. The API propagates
+`registry.manifest.manifest_digest` verbatim from the static signed
+registry. This is intentional: the canonical source of truth for the
+manifest digest is the value the issuer signed inside
+`manifest_signature`. Recomputation is a verifier-side cross-check, not
+a server-side authority. The static registry's signed manifest is the
+authority; the API is a propagation/lookup layer; the verifier
+recomputes locally to confirm the chain.
 
 Concretely, the digest is computed as:
 
@@ -439,11 +468,63 @@ documented separately.
 ## 6. Verify the API independently
 
 The Fall Risk verification API is a separate surface from the static
-registry. It accepts a manifest of SHA-256 hashes and returns lookup
-results, each containing a JWS that should match the corresponding
-record in the static signed registry.
+registry. It exposes five endpoints under
+`https://api.attest.fallrisk.ai/v1/`:
 
-The request body shape is:
+```text
+GET  /v1/verify/hash/{sha256}       — single-hash lookup
+POST /v1/verify/manifest            — batch lookup (max 1000 hashes)
+GET  /v1/health                     — liveness probe
+GET  /v1/registry/status            — registry snapshot metadata
+GET  /v1/registry/manifest_digest   — registry manifest identity + signature
+```
+
+The API is a propagation/lookup layer over the static signed registry.
+**It does not recompute or re-derive any signed value.** Signed
+registry fields returned by the API, including
+`registry_manifest_digest`, `record_jws`, and `manifest_signature`,
+are propagated verbatim from the loaded static registry at
+`https://attest.fallrisk.ai/registry.json`. The API may add transport
+metadata such as `registry_snapshot_at` (the timestamp when this API
+instance loaded the registry), but it does not redefine registry
+identity. The API exists for batch-lookup ergonomics and does not
+substitute for the static registry's authority.
+
+Verifying the API therefore reduces to two questions:
+
+1. Is the API serving the same registry snapshot as the static
+   registry? (Compare `registry_manifest_digest` byte-for-byte against
+   `manifest.manifest_digest` in the static registry.)
+2. Are the per-record signatures the API returns identical to those in
+   the static registry? (Compare `record_jws` byte-for-byte against
+   the local `signature` field.)
+
+If both hold, the API is a faithful propagation of the static
+authority. If either fails, treat the static registry as
+authoritative and do not rely on the API for that snapshot.
+
+At the time of writing (April 29, 2026), the canonical manifest
+digest was:
+
+```
+251d5b648ee7533c6e0064308c1491403b561619759485ed4f0f32d6c2870cd3
+```
+
+This is shown as an illustration. The authoritative current value is
+whatever `manifest.manifest_digest` says inside the live signed
+registry at `https://attest.fallrisk.ai/registry.json`; the
+verification commands below compute or fetch it directly. If the value
+in this document falls behind a registry update, the registry is
+authoritative.
+
+The format is locked: 64-character lowercase raw hex, no `sha256:`
+prefix. The API's `registry_manifest_digest` field returns the same
+format, and the new `/v1/registry/manifest_digest` endpoint exposes
+the same value along with the JWS-signed `manifest_signature` so
+clients can independently verify the digest against the published JWKS
+without relying on any other API surface.
+
+The request body shape for `/v1/verify/manifest` is:
 
 ```json
 {
@@ -462,16 +543,28 @@ The response shape is:
   ],
   "registry_kid": "fallrisk-96cd5e6a01e1",
   "registry_snapshot_at": "2026-04-...",
-  "registry_manifest_digest": "5f159f7f6408e476..."
+  "registry_manifest_digest": "251d5b648ee7533c6e0064308c1491403b561619759485ed4f0f32d6c2870cd3"
 }
 ```
+
+(The digest shown above is the value at the time of writing. Live
+responses return whatever `manifest.manifest_digest` is in the
+currently-loaded registry snapshot.)
+
+The `registry_manifest_digest` is the canonical raw-hex value from
+`registry.manifest.manifest_digest` at the static authority. It is
+propagated verbatim across every API response — there is no
+recomputation step in the API. Format is locked: 64 lowercase hex
+characters, no `sha256:` prefix.
 
 The `registry_manifest_digest` field is the
 `manifest.manifest_digest` value from the registry snapshot the API
 used for the lookup. A verifier comparing the API's response to a
 local static registry should compare digests, not just timestamps —
-digest equality proves the two snapshots are byte-equivalent in
-their record set.
+digest equality proves the two snapshots commit to the same canonical
+record set. (The same record set may be represented by JSON files that
+differ in whitespace, key ordering, or other surfaces the digest does
+not commit to; digest equality binds the records, not the file bytes.)
 
 To verify the API independently, send a manifest containing a hash you
 know is in the signed registry, and confirm the response's
@@ -587,6 +680,123 @@ that snapshot, that is a bug worth reporting.
 The API is convenient for batch lookups but is not authoritative. The
 authoritative source is the signed registry at
 `attest.fallrisk.ai/registry.json`.
+
+---
+
+## 6.5. Verify the manifest digest endpoint independently
+
+The `/v1/registry/manifest_digest` endpoint returns the registry's
+manifest digest along with the JWS-signed `manifest_signature` that
+proves the issuer attested to that digest. This is the single most
+direct path to verify the API is serving an authentic registry without
+fetching the registry itself.
+
+```bash
+curl -sSL https://api.attest.fallrisk.ai/v1/registry/manifest_digest \
+    -o digest_response.json
+
+python3 -m json.tool digest_response.json
+```
+
+Expected response (the `manifest_digest` value below is the value at
+the time of writing; live responses return whatever
+`manifest.manifest_digest` is in the currently-loaded registry):
+
+```json
+{
+  "manifest_digest": "251d5b648ee7533c6e0064308c1491403b561619759485ed4f0f32d6c2870cd3",
+  "manifest_signature": "eyJhbGciOiJSUzI1NiIs...",
+  "registry_kid": "fallrisk-96cd5e6a01e1",
+  "registry_snapshot_at": "2026-04-29T..."
+}
+```
+
+Verify the JWS signature against the published JWKS and confirm the
+signed payload contains the same digest the API returned:
+
+```bash
+python3 << 'EOF'
+import json
+import jwt
+from jwt.algorithms import RSAAlgorithm
+import urllib.request
+
+# Load the API response
+resp = json.load(open('digest_response.json'))
+api_digest = resp['manifest_digest']
+manifest_signature = resp['manifest_signature']
+api_kid = resp['registry_kid']
+
+# Fetch the published JWKS (or use the one from §1)
+with urllib.request.urlopen(
+    'https://attest.fallrisk.ai/.well-known/jwks.json'
+) as f:
+    jwks = json.load(f)
+
+# Find the matching public key
+jwk_data = next(
+    k for k in jwks['keys']
+    if k.get('kid') == api_kid
+)
+public_key = RSAAlgorithm.from_jwk(json.dumps(jwk_data))
+
+# Verify the JWS signature
+try:
+    payload = jwt.decode(
+        manifest_signature,
+        public_key,
+        algorithms=['RS256'],
+        options={'verify_aud': False, 'verify_iss': False, 'verify_exp': False},
+    )
+    print("Manifest signature VERIFIED")
+except jwt.InvalidSignatureError:
+    print("Manifest signature INVALID — do not trust this API instance")
+    raise SystemExit(1)
+
+# The signed payload should contain a manifest_digest field that
+# matches what the API claimed. This is the anti-tampering check.
+signed_digest = payload.get('manifest_digest', '')
+# Defensive: strip a "sha256:" prefix if the signer ever emits one;
+# the API normalizes to raw hex so we compare like-for-like.
+signed_digest = signed_digest.removeprefix('sha256:')
+
+print(f"API claim:    {api_digest}")
+print(f"Signed value: {signed_digest}")
+
+if api_digest == signed_digest:
+    print("Digest in JWS payload matches API claim — chain intact")
+else:
+    print("MISMATCH: API is reporting a digest the issuer did not sign")
+    print("This is a P0 verification failure; do not trust this API instance")
+    raise SystemExit(1)
+EOF
+```
+
+If both the JWS verifies and the signed payload's `manifest_digest`
+matches the API's claim, the API is provably serving a registry
+snapshot whose manifest digest was signed by the canonical issuer. No
+other API endpoint or verification step is needed to establish the
+manifest digest's authenticity.
+
+This is the test class that catches the manifest-digest drift bug
+class (where an API recomputes a digest the issuer never signed). If
+the API's `manifest_digest` differs from the digest inside the verified
+JWS payload, the API is reporting an unsigned value — verification
+fails closed.
+
+The full set of digest sources that must agree byte-for-byte:
+
+```text
+1. Static registry → manifest.manifest_digest
+2. /v1/registry/manifest_digest → manifest_digest
+3. /v1/registry/status → registry_manifest_digest
+4. /v1/verify/hash/{sha256} → registry_manifest_digest
+5. /v1/verify/manifest → registry_manifest_digest
+6. JWS payload of manifest_signature → manifest_digest (after stripping any sha256: prefix)
+```
+
+A discrepancy between any two of these is a verification failure for
+the system as a whole. Report immediately to `security@fallrisk.ai`.
 
 ---
 
@@ -706,13 +916,43 @@ list of non-claims.
 
 ---
 
+## Verification failure categories
+
+A failure of any verification step in this document falls into one of
+the following categories. The category determines the impact and the
+appropriate response.
+
+| Category | Meaning | Response |
+|---|---|---|
+| JWKS mismatch | Embedded JWKS in registry differs from published JWKS, or bundled JWKS in Trustfall Lite differs from published JWKS | Do not proceed. The registry's key set and the public trust anchor disagree. Verify per-record signatures against the published JWKS, not the embedded JWKS, before drawing any conclusion. Report to `security@fallrisk.ai`. |
+| Issuer fingerprint mismatch | Computed RFC 7638 thumbprint does not match the documented value | Do not proceed. The key has rotated, the JWKS has changed, or the documentation is stale. Report. |
+| Manifest signature verification failure | `manifest_signature` does not verify under the published JWKS | Do not proceed. Treat the registry as untrusted. Report. |
+| Per-record JWS verification failure | A specific `signature` field does not verify under the published JWKS | The affected record is untrusted. Other records in the registry are unaffected. Report. |
+| Manifest digest mismatch | Recomputed manifest digest does not match the value stored in the manifest | Do not proceed. The registry's record set has been modified after signing. Report. |
+| API/static registry mismatch | API's `registry_manifest_digest` differs from static registry's `manifest.manifest_digest` | If both digests verify under the JWKS, this is a registry rollout in progress; the static registry is authoritative. If only one digest verifies, treat the unverified side as untrusted. |
+| Local artifact not enrolled | A scanned hash does not appear in any signed registry record | Not a verification failure. The artifact is not in the signed registry; this is a reportable scan outcome, not a security event. |
+
+Use neutral language when reporting:
+
+- "verification failed" — a documented check did not produce the expected result
+- "do not proceed" — do not treat the unverified surface as authoritative
+- "report to `security@fallrisk.ai`" — escalate the finding
+
+Avoid attribution language ("tampered," "compromised," "malicious,"
+"fake") unless the evidence directly supports it. A failed verification
+is a verification failure first. Attribution requires additional
+investigation.
+
+---
+
 ## Reporting verification failures
 
 If any command in this document produces output other than what is
 documented, that is a bug and should be reported.
 
 - Repository: `github.com/fallrisk-ai/trustfall-lite`
-- Email: `anthony@fallrisk.ai`
+- Email: `security@fallrisk.ai` (canonical for verification-chain failures)
+- Fallback: `anthony@fallrisk.ai`
 
 Please include:
 
