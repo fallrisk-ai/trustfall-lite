@@ -1,0 +1,131 @@
+name: Bug report
+description: Report a bug in Trustfall Lite (the CLI, the scanner, the diff command, the verifier, or any documented behavior).
+title: "[bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill out
+        the fields below so we can reproduce it.
+
+        **Before filing:**
+        - For security vulnerabilities, do NOT use this template.
+          See `SECURITY.md` and email security@fallrisk.ai.
+        - For "please enroll my model" / "Trustfall says my model is
+          unknown_variant" requests, use the **Registry coverage
+          request** template instead.
+
+  - type: input
+    id: trustfall_version
+    attributes:
+      label: Trustfall version
+      description: |
+        Paste the output of `trustfall version`. This includes the
+        package version, snapshot version, and issuer kid.
+
+        **Privacy note:** the version output includes a local
+        snapshot path (e.g., `path: /Users/<username>/.cache/...`).
+        Redact your username from that line if you'd rather not
+        share it.
+      placeholder: |
+        trustfall-lite 0.3.0
+        snapshot: 2026-04-26T18:32:00Z (75 records)
+        issuer_kid: fallrisk-96cd5e6a01e1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other (please specify in additional context)
+    validations:
+      required: true
+
+  - type: input
+    id: python_version
+    attributes:
+      label: Python version
+      description: Output of `python3 --version` or `python --version`.
+      placeholder: "Python 3.12.3"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Install method
+      options:
+        - pipx
+        - pip (in a virtualenv)
+        - pip (system / --user)
+        - source (git clone + pip install -e .)
+        - other (please specify)
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command run
+      description: |
+        The exact command(s) you ran. Redact anything sensitive
+        (paths revealing private model inventory, internal
+        hostnames, etc.) before pasting.
+      placeholder: |
+        trustfall scan ~/models --json
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: |
+        What actually happened? Include any error messages,
+        unexpected exit codes, or output that surprised you.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: |
+        Optional. Logs, screenshots, or anything else that helps.
+
+        **Privacy warning:** do NOT paste full `trustfall scan
+        --json` output unless you have reviewed it for sensitive
+        information. The JSON may include filesystem paths and
+        a list of model artifacts on your machine. If you need to
+        share scan output, redact paths and consider whether the
+        model inventory itself is sensitive in your environment.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have searched existing issues for duplicates.
+          required: true
+        - label: This is not a security vulnerability (those go to security@fallrisk.ai).
+          required: true
+        - label: I have redacted any sensitive information from the command, output, and additional context.
+          required: true

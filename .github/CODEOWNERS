@@ -1,0 +1,12 @@
+# Code review ownership for the trustfall-lite repository.
+#
+# GitHub uses this file to automatically request review from the
+# named owners when pull requests touch their paths. The patterns
+# follow .gitignore syntax. Later patterns override earlier ones.
+#
+# `fallrisk-ai` is a personal GitHub account. If a maintainers team
+# is later created under an org, replace `@fallrisk-ai` with
+# `@org/maintainers` so review routing follows team membership.
+
+# Default owner for all files in the repo
+*       @fallrisk-ai

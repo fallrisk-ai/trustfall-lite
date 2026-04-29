@@ -1,0 +1,438 @@
+# Production release workflow.
+#
+# Triggers ONLY on tag push matching v*.*.* (e.g., v0.3.0, v0.3.0rc1).
+# Manually invoked workflow_dispatch is NOT supported — releases must
+# come from tags, full stop. For rehearsal without publishing, use
+# release-dry-run.yml.
+#
+# Tag-shape routing (PEP 440 pre-release suffixes):
+#   v0.3.0       → real PyPI (Trusted Publishing)
+#   v0.3.0rc1    → TestPyPI + GitHub prerelease
+#   v0.3.0a1     → TestPyPI + GitHub prerelease
+#   v0.3.0b2     → TestPyPI + GitHub prerelease
+#   v0.3.0.dev1  → TestPyPI + GitHub prerelease
+#   v0.3.0.post1 → real PyPI (post-releases are stable)
+#
+# A tag is considered a pre-release if it contains an alpha, beta,
+# rc, or dev suffix per PEP 440. The shell detection looks for the
+# specific markers `a`, `b`, `rc`, `dev`. Post-releases (`.postN`)
+# are stable releases that supersede the prior version.
+#
+# CRITICAL: the package version in pyproject.toml MUST match the
+# tag version. For RC tags, both the tag and pyproject.toml use
+# PEP 440 form (e.g., tag v0.3.0rc1 ↔ pyproject "0.3.0rc1"). Do
+# NOT use hyphenated forms like v0.3.0-rc.1 — PEP 440 normalizes
+# the wheel filename to 0.3.0rc1, which would break the tag-vs-
+# wheel sanity check.
+#
+# Required PyPI configuration BEFORE this workflow can succeed:
+#   1. PyPI: Trusted Publisher configured for fallrisk-ai/trustfall-lite
+#      with workflow filename "release.yml" and environment "pypi".
+#   2. TestPyPI: same, but environment "testpypi".
+#   3. GitHub: environments "pypi" and "testpypi" exist on the repo.
+#      Recommended: required reviewers on the "pypi" environment for
+#      manual approval gate before production publish.
+#
+# Steps:
+#   1. Build wheel + sdist
+#   2. Run pytest against editable install (catches code regressions)
+#   3. Smoke-test the built wheel in a clean venv (catches packaging issues)
+#   4. Generate SHA256SUMS
+#   5. Generate CycloneDX SBOM in a clean venv (no dev deps in graph)
+#   6. Generate artifact attestations
+#   7. Publish to PyPI or TestPyPI based on tag shape
+#   8. Create GitHub Release with all artifacts attached
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  # Default deny everything; each job sets what it needs
+  contents: read
+
+jobs:
+  # ──────────────────────────────────────────────────────────────
+  # Job 1: build the artifacts and validate them.
+  # ──────────────────────────────────────────────────────────────
+  build:
+    name: Build wheel + sdist
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      is_prerelease: ${{ steps.tag-shape.outputs.is_prerelease }}
+      tag_name: ${{ steps.tag-shape.outputs.tag_name }}
+      tag_version: ${{ steps.tag-shape.outputs.tag_version }}
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Detect tag shape
+        id: tag-shape
+        # PEP 440 pre-release suffixes after the version core:
+        #   - rcN   (release candidate)
+        #   - aN    (alpha)
+        #   - bN    (beta)
+        #   - .devN (development release)
+        # Post-releases (.postN) are STABLE; they supersede the
+        # prior version and publish to real PyPI.
+        #
+        # CRITICAL: this step rejects non-PEP-440 tag forms (e.g.,
+        # v0.3.0-rc.1 with hyphens/dots) rather than silently
+        # mis-routing them. The wheel filename uses PEP 440
+        # normalization, so non-PEP-440 tags would either fail the
+        # filename check (good) or — worse — be classified as
+        # stable and routed to real PyPI (bad). Fail loudly here.
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          TAG_VERSION="${TAG#v}"
+          echo "tag_name=${TAG}" >> $GITHUB_OUTPUT
+          echo "tag_version=${TAG_VERSION}" >> $GITHUB_OUTPUT
+
+          # Validate tag is PEP 440 compliant. Allowed forms:
+          #   N.N.N
+          #   N.N.N(a|b|rc)N
+          #   N.N.N.devN
+          #   N.N.N.postN
+          # No hyphens, no dots inside the pre-release suffix.
+          if ! [[ "${TAG_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+|\.dev[0-9]+|\.post[0-9]+)?$ ]]; then
+            echo "ERROR: tag '${TAG}' is not in PEP 440 form." >&2
+            echo "       Expected: vN.N.N, vN.N.NrcN, vN.N.N.devN, or vN.N.N.postN" >&2
+            echo "       Examples: v0.3.0, v0.3.0rc1, v0.3.0.dev1, v0.3.0.post1" >&2
+            echo "       NOT allowed: v0.3.0-rc.1, v0.3.0-rc1, v0.3.0_rc1" >&2
+            exit 1
+          fi
+
+          # Pre-release detection: matches PEP 440 a/b/rc/dev suffixes
+          # but NOT post-releases (those are stable).
+          if [[ "${TAG_VERSION}" =~ (a|b|rc)[0-9]+$ ]] || [[ "${TAG_VERSION}" =~ \.dev[0-9]+$ ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+            echo "Detected pre-release tag: ${TAG} (version ${TAG_VERSION})"
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+            echo "Detected stable release tag: ${TAG} (version ${TAG_VERSION})"
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install build tooling and dev deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+          python -m pip install -e ".[dev]"
+
+      - name: Run pytest against the source tree
+        # This catches code regressions before we build the wheel.
+        # The clean-venv wheel smoke test below catches packaging
+        # issues that don't manifest in editable install.
+        run: pytest -q --tb=short
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Verify built artifacts match tag version
+        run: |
+          echo "Built artifacts:"
+          ls -la dist/
+          # Sanity check: package metadata version must match the
+          # tag version. PEP 440 normalizes the wheel filename, so
+          # the tag form (e.g., v0.3.0rc1) and the wheel form
+          # (0.3.0rc1) match exactly when both follow PEP 440.
+          TAG_VERSION="${{ steps.tag-shape.outputs.tag_version }}"
+          if ! ls dist/fallrisk_trustfall-${TAG_VERSION}-*.whl >/dev/null 2>&1; then
+            echo "ERROR: built wheel does not match tag version ${TAG_VERSION}" >&2
+            echo "       Check that pyproject.toml version matches the tag." >&2
+            echo "       Tag form must be PEP 440 compliant (v0.3.0, v0.3.0rc1, not v0.3.0-rc.1)." >&2
+            ls dist/ >&2
+            exit 1
+          fi
+          echo "Wheel filename matches tag version ${TAG_VERSION}"
+
+      - name: Smoke-test the built wheel in a clean venv
+        # The pytest run above tested the source tree via editable
+        # install. This step verifies the BUILT WHEEL works as a
+        # standalone install — catches packaging issues like
+        # missing files in MANIFEST.in or wrong entry_points.
+        run: |
+          python -m venv /tmp/wheel-test
+          /tmp/wheel-test/bin/python -m pip install --upgrade pip
+          /tmp/wheel-test/bin/python -m pip install dist/*.whl
+          # The trustfall binary should be on PATH inside the venv
+          /tmp/wheel-test/bin/trustfall --version
+          /tmp/wheel-test/bin/trustfall version
+          /tmp/wheel-test/bin/trustfall --help
+          /tmp/wheel-test/bin/trustfall scan --help
+          /tmp/wheel-test/bin/trustfall verify --help
+          /tmp/wheel-test/bin/trustfall registry --help
+          /tmp/wheel-test/bin/trustfall diff --help
+          echo "Built wheel smoke test passed."
+
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum *.whl *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Generate CycloneDX SBOM with two-venv split
+        # CRITICAL: the SBOM must reflect the runtime dependency
+        # graph of the package as installed by users, with NO
+        # build/test/SBOM-tool deps mixed in.
+        #
+        # The cyclonedx-py CLI introspects whatever Python interpreter
+        # it is pointed at. If we install both the wheel AND
+        # cyclonedx-bom into the same venv, the SBOM will include
+        # cyclonedx-bom's own dependency graph (jsonschema, lxml,
+        # py-serializable, etc.). The fix is two separate venvs:
+        #
+        #   /tmp/runtime-venv  ← only the built wheel installed
+        #   /tmp/sbom-tool-venv ← only cyclonedx-bom installed
+        #
+        # The tool from sbom-tool-venv reads runtime-venv via a
+        # positional <python> argument, producing a clean SBOM.
+        run: |
+          # Runtime venv: install ONLY the built wheel
+          python -m venv /tmp/runtime-venv
+          /tmp/runtime-venv/bin/python -m pip install --upgrade pip
+          /tmp/runtime-venv/bin/python -m pip install dist/*.whl
+
+          # Tool venv: install ONLY cyclonedx-bom
+          python -m venv /tmp/sbom-tool-venv
+          /tmp/sbom-tool-venv/bin/python -m pip install --upgrade pip
+          /tmp/sbom-tool-venv/bin/python -m pip install cyclonedx-bom
+
+          # Generate the SBOM: tool reads from runtime venv
+          /tmp/sbom-tool-venv/bin/cyclonedx-py environment \
+            --output-format JSON \
+            --output-file dist/sbom.cdx.json \
+            /tmp/runtime-venv/bin/python
+
+          # Sanity check: it parses as JSON
+          python -c "import json; json.load(open('dist/sbom.cdx.json'))"
+
+          # Hardened contamination check: forbid both dev/build deps
+          # AND any cyclonedx-bom dep-graph leakage. Anchor patterns
+          # rather than substrings so we don't false-positive.
+          python <<'PY'
+          import json
+          sbom = json.load(open('dist/sbom.cdx.json'))
+          components = sbom.get('components', [])
+          names = sorted({c.get('name', '').lower() for c in components})
+          # Dev/test/build deps must never appear in a release SBOM
+          forbidden_dev = {'pytest', 'pytest-mock', 'pytest-asyncio',
+                           'respx', 'build'}
+          # SBOM-tool deps that would indicate the runtime venv was
+          # contaminated with cyclonedx-bom itself
+          forbidden_sbom_tool = {'cyclonedx-bom', 'cyclonedx-python-lib',
+                                 'py-serializable', 'sortedcontainers',
+                                 'jsonschema', 'jsonschema-specifications',
+                                 'lxml', 'license-expression',
+                                 'boolean.py', 'lark', 'arrow',
+                                 'pip-requirements-parser',
+                                 'packageurl-python', 'defusedxml',
+                                 'fqdn', 'isoduration', 'jsonpointer',
+                                 'rfc3339-validator', 'rfc3986-validator',
+                                 'rfc3987-syntax', 'uri-template',
+                                 'webcolors'}
+          dev_contam = forbidden_dev & set(names)
+          tool_contam = forbidden_sbom_tool & set(names)
+          if dev_contam:
+              print(f"ERROR: SBOM includes dev/build deps: {sorted(dev_contam)}")
+              print(f"All components: {names}")
+              raise SystemExit(1)
+          if tool_contam:
+              print(f"ERROR: SBOM includes SBOM-tool deps (venv split failed): {sorted(tool_contam)}")
+              print(f"All components: {names}")
+              raise SystemExit(1)
+          print(f"SBOM clean. Runtime components ({len(names)}): {names}")
+          PY
+
+      - name: Upload build artifacts (between jobs)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: release-${{ steps.tag-shape.outputs.tag_name }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/sbom.cdx.json
+          retention-days: 30
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 2: generate artifact attestations for the built wheel/sdist.
+  # ──────────────────────────────────────────────────────────────
+  attest:
+    name: Generate build provenance attestations
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 5
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: release-${{ needs.build.outputs.tag_name }}
+          path: dist
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45  # v2
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 3: publish to TestPyPI (only for pre-release tags).
+  # ──────────────────────────────────────────────────────────────
+  publish-testpypi:
+    name: Publish to TestPyPI
+    runs-on: ubuntu-latest
+    needs: [build, attest]
+    if: needs.build.outputs.is_prerelease == 'true'
+    timeout-minutes: 10
+
+    # Environment "testpypi" must exist on the repo with the TestPyPI
+    # Trusted Publisher configured to point at this workflow.
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/fallrisk-trustfall/
+
+    permissions:
+      id-token: write  # required for OIDC Trusted Publishing
+      contents: read
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: release-${{ needs.build.outputs.tag_name }}
+          path: dist
+
+      - name: Strip non-package files from dist
+        # pypa/gh-action-pypi-publish only wants .whl and .tar.gz;
+        # SHA256SUMS and sbom.cdx.json go to the GitHub Release, not PyPI.
+        run: |
+          mv dist/SHA256SUMS .
+          mv dist/sbom.cdx.json .
+          ls -la dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # No username/password — Trusted Publishing via OIDC.
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 4: publish to real PyPI (only for stable / post-release tags).
+  # ──────────────────────────────────────────────────────────────
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [build, attest]
+    if: needs.build.outputs.is_prerelease == 'false'
+    timeout-minutes: 10
+
+    # Environment "pypi" must exist on the repo with the PyPI
+    # Trusted Publisher configured to point at this workflow.
+    # Recommended: configure required-reviewer protection on this
+    # environment so production publishes need explicit approval.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/fallrisk-trustfall/
+
+    permissions:
+      id-token: write  # required for OIDC Trusted Publishing
+      contents: read
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: release-${{ needs.build.outputs.tag_name }}
+          path: dist
+
+      - name: Strip non-package files from dist
+        run: |
+          mv dist/SHA256SUMS .
+          mv dist/sbom.cdx.json .
+          ls -la dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
+        # No username/password — Trusted Publishing via OIDC.
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 5: create the GitHub Release with all artifacts attached.
+  #
+  # Runs only after build + attest succeed AND the relevant publish
+  # path also succeeded. If publish fails, this job does NOT run —
+  # the operator can investigate from the uploaded build artifacts
+  # (retained for 30 days) and re-tag with a fix.
+  # ──────────────────────────────────────────────────────────────
+  github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build, attest, publish-testpypi, publish-pypi]
+    # Use always() so the conditional logic below evaluates even
+    # when one of the publish paths was correctly skipped (because
+    # of tag shape). The condition then asserts that the publish
+    # path which SHOULD have run actually succeeded.
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      needs.attest.result == 'success' &&
+      (needs.publish-testpypi.result == 'success' || needs.publish-testpypi.result == 'skipped') &&
+      (needs.publish-pypi.result == 'success' || needs.publish-pypi.result == 'skipped') &&
+      (needs.publish-testpypi.result == 'success' || needs.publish-pypi.result == 'success')
+    timeout-minutes: 5
+
+    permissions:
+      contents: write  # required to create the release
+
+    steps:
+      - name: Check out repository (for gh CLI)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: release-${{ needs.build.outputs.tag_name }}
+          path: dist
+
+      - name: Create GitHub Release via gh CLI
+        # Using `gh release create` instead of a third-party action
+        # to minimize the third-party-Action surface in the release-
+        # critical path. gh is preinstalled on GitHub runners.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag_name }}
+          IS_PRERELEASE: ${{ needs.build.outputs.is_prerelease }}
+        run: |
+          # Build the prerelease flag conditionally
+          PRERELEASE_FLAG=""
+          if [[ "${IS_PRERELEASE}" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          gh release create "${TAG}" \
+            dist/*.whl \
+            dist/*.tar.gz \
+            dist/SHA256SUMS \
+            dist/sbom.cdx.json \
+            --title "${TAG}" \
+            --generate-notes \
+            ${PRERELEASE_FLAG}

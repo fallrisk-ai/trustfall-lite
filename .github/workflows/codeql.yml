@@ -1,0 +1,72 @@
+# CodeQL static-analysis workflow.
+#
+# Runs on:
+#   - Every PR against main
+#   - Every push to main
+#   - Weekly cron (Monday 14:00 UTC = 09:00 America/Chicago)
+#
+# Scoped to src/ via .github/codeql/codeql-config.yml. Findings
+# upload to the repository's Security tab.
+
+name: codeql
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  schedule:
+    # Monday 14:00 UTC, matching Dependabot's weekly cadence
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
+
+permissions:
+  # CodeQL needs to upload findings to the Security tab
+  security-events: write
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    name: CodeQL analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - python
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        # CodeQL needs the resolved dependencies in scope to build a
+        # complete call graph. Editable install matches what pytest sees.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Run CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

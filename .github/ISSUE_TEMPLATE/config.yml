@@ -1,0 +1,28 @@
+# GitHub issue template configuration.
+#
+# blank_issues_enabled: false forces users to pick a structured
+# template. This is important for a security tool — it ensures
+# vulnerability reports route off GitHub via SECURITY.md instead of
+# being filed as public issues.
+
+blank_issues_enabled: false
+
+contact_links:
+  - name: Security vulnerability
+    url: mailto:security@fallrisk.ai
+    about: |
+      Do NOT report security vulnerabilities as public GitHub issues.
+      Email security@fallrisk.ai. See SECURITY.md for the full
+      reporting policy and the OpenPGP key for sensitive reports.
+
+  - name: Code of Conduct concern
+    url: mailto:conduct@fallrisk.ai
+    about: |
+      Code of conduct enforcement is handled privately at
+      conduct@fallrisk.ai, not in public issues.
+
+  - name: General question or discussion
+    url: https://github.com/fallrisk-ai/trustfall-lite/discussions
+    about: |
+      For usage questions, design discussions, or things that aren't
+      bugs or registry-coverage requests.

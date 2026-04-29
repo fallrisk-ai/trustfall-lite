@@ -1,0 +1,31 @@
+# CodeQL configuration.
+#
+# Scoped to the production source tree only. Tests are excluded
+# because test code legitimately does things CodeQL flags as
+# suspect (eval-like patterns, hardcoded fixtures, etc.) and the
+# noise would dilute real findings.
+#
+# The shipped package surface is `src/fallrisk_trustfall/`. That's
+# what we scan. Test code is not shipped to PyPI and any issues
+# there don't affect users.
+#
+# Query suite: security-and-quality. This is broader than
+# security-only and catches additional code-quality issues that
+# matter for a security tool.
+
+name: "Trustfall Lite CodeQL config"
+
+# Use the upstream-maintained suite for thorough coverage on
+# production code.
+queries:
+  - uses: security-and-quality
+
+paths:
+  - "src/fallrisk_trustfall"
+
+paths-ignore:
+  - "tests/**"
+  - "docs/**"
+  - "examples/**"
+  - "**/__pycache__/**"
+  - "**/*.pyc"

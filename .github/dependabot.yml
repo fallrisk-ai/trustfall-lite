@@ -1,0 +1,68 @@
+# Dependabot configuration.
+#
+# Trustfall Lite has a small dependency footprint by design. We
+# update weekly so security patches land quickly without burying
+# the maintainer in PRs.
+#
+# Grouping strategy:
+#   - minor and patch updates → one combined PR per ecosystem, per week
+#   - major updates → individual PRs (they may break behavior; review separately)
+#
+# Both ecosystems are tracked: Python (pip) and the GitHub Actions
+# we use in our workflows.
+
+version: 2
+updates:
+  # Python runtime dependencies (declared in pyproject.toml)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Chicago"
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+      python-security:
+        applies-to: security-updates
+        update-types:
+          - "minor"
+          - "patch"
+          - "major"
+    labels:
+      - "dependencies"
+      - "python"
+    reviewers:
+      - "fallrisk-ai"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+
+  # GitHub Actions used by our workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Chicago"
+    open-pull-requests-limit: 3
+    groups:
+      actions-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    reviewers:
+      - "fallrisk-ai"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
