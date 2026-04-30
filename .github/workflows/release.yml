@@ -275,6 +275,7 @@ jobs:
     name: Generate build provenance attestations
     runs-on: ubuntu-latest
     needs: build
+    if: github.event.repository.visibility == 'public'
     timeout-minutes: 5
 
     permissions:
