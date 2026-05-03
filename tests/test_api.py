@@ -30,6 +30,7 @@ from fallrisk_trustfall.api import (
     VerifiedRecord,
     _is_valid_hex_sha256,
 )
+from fallrisk_trustfall import __version__
 
 from tests.fixtures import (
     PROD_JWKS,
@@ -280,7 +281,7 @@ class TestVerifyManifestEndpoint:
         body = captured["body"]
         assert "hashes" in body
         assert "client" in body
-        assert body["client"] == {"name": "trustfall-lite", "version": "0.3.0"}
+        assert body["client"] == {"name": "trustfall-lite", "version": __version__}
         assert len(body["hashes"]) == 1
         assert body["hashes"][0] == {
             "sha256": sha256,

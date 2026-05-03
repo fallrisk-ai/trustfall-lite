@@ -16,6 +16,7 @@ import pytest
 from click.testing import CliRunner
 
 from fallrisk_trustfall.cli import main
+from fallrisk_trustfall import __version__
 
 
 @pytest.fixture
@@ -33,7 +34,7 @@ class TestVersionCommand:
         result = runner.invoke(main, ["version"])
         assert result.exit_code == 0
         assert "trustfall-lite" in result.output
-        assert "0.3.0" in result.output
+        assert __version__ in result.output
 
     def test_shows_issuer_kid(self, runner):
         result = runner.invoke(main, ["version"])
@@ -570,7 +571,7 @@ class TestTopLevelCLI:
     def test_version_flag(self, runner):
         result = runner.invoke(main, ["--version"])
         assert result.exit_code == 0
-        assert "0.3.0" in result.output
+        assert __version__ in result.output
 
     def test_unknown_command_errors(self, runner):
         result = runner.invoke(main, ["bogus-command"])

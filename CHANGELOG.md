@@ -27,6 +27,18 @@ section is added at the top.
 
 ---
 
+## [0.3.2] - 2026-05-03
+
+### Fixed
+
+- `trustfall version` now correctly reports the installed package version.
+  Previously the version string was hardcoded in `__init__.py` and not
+  bumped in 0.3.1, causing the command to print "0.3.0" against a 0.3.1
+  install. The version is now read dynamically via `importlib.metadata`,
+  preventing this synchronization bug class permanently.
+
+---
+
 ## [0.3.1] - 2026-05-03
 
 ### Added
