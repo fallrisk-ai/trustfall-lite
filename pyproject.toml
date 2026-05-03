@@ -1,6 +1,6 @@
 [project]
 name = "fallrisk-trustfall"
-version = "0.3.0"
+version = "0.3.0rc1"
 description = "Local artifact verifier for the Fall Risk model identity registry"
 requires-python = ">=3.10"
 license = "Apache-2.0"
