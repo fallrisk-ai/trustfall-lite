@@ -27,6 +27,14 @@ section is added at the top.
 
 ---
 
+## [0.3.1] - 2026-05-03
+
+### Added
+
+- `readme = "README.md"` field in `pyproject.toml` so the PyPI project page
+  renders the project's README.md. Previously the page showed "no description."
+---
+
 ## [0.3.0] - 2026-05-03
 
 ### Added
