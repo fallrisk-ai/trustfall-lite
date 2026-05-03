@@ -15,6 +15,22 @@ section is added at the top.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+### Deprecated
+
+### Removed
+
+### Security
+
+---
+
+## [0.3.0] - 2026-05-03
+
+### Added
+
 - `trustfall diff` command for comparing two scan-output JSON
   reports. Detects six change classes: `group_added`,
   `group_removed`, `artifact_added`, `artifact_removed`,
