@@ -93,8 +93,16 @@ When the user passes `--include-paths`, JSON output may include:
 - the absolute filesystem path of each scanned artifact,
 - the literal command-line `scan_paths` arguments.
 
-`--include-paths` affects local JSON output only. It does not cause
-filesystem paths to be sent to the verification API.
+In API-backed scans, `--include-paths` may **also** send home-collapsed
+relative path hints to the registry API. This flag predates v0.4 and
+is a network-side path-hint control as well as a local JSON-output
+control. Users who want no per-scan network disclosure should use
+`--local-only`.
+
+`--export-include-paths` is separate: it controls only whether path
+columns are written into a local export file. It is not the same flag
+as `--include-paths`, and neither implies the other (see the
+"Inventory export" section above).
 
 If the user has opted in, the user is responsible for redacting the
 JSON before sharing it externally (in bug reports, audit submissions,
@@ -167,6 +175,64 @@ collection change, and the change will be flagged in `CHANGELOG.md`.
 
 ---
 
+## Inventory export (`--export`)
+
+`trustfall scan --export PATH` writes a flat CSV or JSONL inventory of
+the scan result to a **local file**. This is a **local file write
+only**: it performs no upload, opens no network connection, starts no
+daemon, and sends nothing anywhere. The export writer consumes the
+already-computed scan result; it triggers no new discovery, hashing,
+or registry lookup, and it does not import any network module.
+
+`--export` does not change the scan lookup mode. A default scan may
+still query the verification API; `--local-only` is the
+no-per-scan-network mode.
+
+**Paths are excluded from the export by default.** The default export
+contains no filesystem paths at all — the path columns are *absent*,
+not present-but-empty. Filesystem paths are written into the export
+only if you explicitly pass `--export-include-paths`.
+
+`--export-include-paths` is a separate, distinct flag from
+`--include-paths`. They are not the same control and one does not
+imply the other:
+
+- `--include-paths` governs whether local path *hints* are sent to
+  the **registry API** during a scan (a network-side privacy control
+  that predates v0.4).
+- `--export-include-paths` governs whether path *columns* are written
+  into the **local export file** (a file-content control introduced
+  in v0.4; it involves no network).
+
+Passing `--include-paths` alone never adds path columns to an export.
+Passing `--export-include-paths` alone never sends paths to the API.
+
+**Display-vs-export path asymmetry (intentional).** The scan-roots
+display and the `--json` `scan_roots` key home-collapse paths — they
+show a `~/` prefix instead of your home directory. The
+`--export-include-paths` columns do **not** home-collapse; they carry
+**full absolute paths**. This is deliberate: the terminal/JSON display
+defaults to the privacy-preserving home-collapsed form, but a user who
+explicitly asks for path columns in an export is asking for
+full-fidelity auditable paths, and home-collapsing them there would be
+a silently-lossy file. So if you see `~/models/...` in the terminal
+but `/Users/alice/models/...` in the exported file, that is correct
+and expected — not a discrepancy. The full export schema is documented
+in [`docs/INVENTORY_EXPORT.md`](docs/INVENTORY_EXPORT.md).
+
+**The export makes no safety or runtime claim.** The
+`tokenizer_surface_coverage` column is an artifact-identity coverage
+signal, not a tokenizer security verdict:
+
+> This column does not mean the tokenizer is safe. It does not mean Trustfall Lite inspected tokenizer contents. For Lane A structural records, `opaque_structural_evidence_binding` means only that the row is bound to a signed structural evidence commitment; the public Lite payload does not enumerate tokenizer files. For Lane B container records, `covered_by_verified_container` means the verified artifact container is the identity surface. This is an artifact-identity coverage signal, not a tokenizer security verdict.
+
+Likewise, the `deep_runtime_claim_applicable` column is a boolean fact
+about a registry record's evidence class. It is **never** a statement
+that Trustfall Lite verified runtime identity — Lite never does that
+(runtime structural identity is Trustfall Deep, a separate product).
+
+---
+
 ## A note on hash leakage
 
 Artifact hashes are not model bytes, but they can still reveal which
@@ -192,11 +258,11 @@ tradeoff is not acceptable.
 
 ## Versioning
 
-This privacy posture applies to Trustfall Lite v0.3.0. Changes to
+This privacy posture applies to Trustfall Lite v0.4.0. Changes to
 default behavior, data collection, or logging will be:
 
 - documented in `CHANGELOG.md` under the relevant version,
 - announced as a privacy change rather than a feature change,
 - noted in this document with the version they took effect.
 
-The current posture is the posture of v0.3.0.
+The current posture is the posture of v0.4.0.

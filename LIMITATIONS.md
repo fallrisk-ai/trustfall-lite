@@ -59,6 +59,23 @@ system can lie about file contents, network behavior, or process
 state. Defending against that requires a hardware-rooted or remote
 attestation model outside the scope of a local Python utility.
 
+**An export column is not a runtime-identity claim.** The
+`deep_runtime_claim_applicable` column in a `trustfall scan --export`
+file is a boolean fact about a registry record's evidence class — it
+states whether a Trustfall Deep runtime-identity claim would even be
+*applicable* to that enrolled model. It is **never** a statement that
+Trustfall Lite verified runtime identity. Trustfall Lite never
+verifies runtime identity; that is the role of Trustfall Deep, a
+separate product.
+
+**An export column is not a tokenizer security verdict.** The
+`tokenizer_surface_coverage` column performs no tokenizer scanning, no
+token heuristics, and renders no safe/unsafe judgment. It reads
+nothing from local tokenizer files. It is a coverage report, not a
+scanner:
+
+> This column does not mean the tokenizer is safe. It does not mean Trustfall Lite inspected tokenizer contents. For Lane A structural records, `opaque_structural_evidence_binding` means only that the row is bound to a signed structural evidence commitment; the public Lite payload does not enumerate tokenizer files. For Lane B container records, `covered_by_verified_container` means the verified artifact container is the identity surface. This is an artifact-identity coverage signal, not a tokenizer security verdict.
+
 ---
 
 ## Appropriate use cases

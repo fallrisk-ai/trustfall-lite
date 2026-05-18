@@ -37,7 +37,23 @@ trustfall scan                       # scan default cache locations
 trustfall scan ~/models              # scan a specific path
 trustfall scan --json                # machine-readable output
 trustfall scan --local-only          # no network — verify against a cached registry snapshot
+trustfall scan --export inv.csv      # also write a flat CSV inventory (local file only)
+trustfall scan --export inv.jsonl    # JSONL instead of CSV (chosen from the extension)
+trustfall scan --export inv.csv --export-include-paths   # opt in to filesystem path columns
 ```
+
+`scan` prints the roots it inspected (the HF cache, Ollama, and any
+explicit paths), so you can see exactly what was and was not scanned.
+
+`--export` writes a local file only and adds no upload or additional
+network behavior. The scan itself follows the mode you selected: by
+default it may query the verification API with artifact hashes; with
+`--local-only` it verifies against the cached signed snapshot without
+per-scan network lookup. The default export contains **no filesystem
+paths**; path columns are
+added only with the separate `--export-include-paths` flag (distinct
+from the network-side `--include-paths`). The full export schema is in
+[`docs/INVENTORY_EXPORT.md`](docs/INVENTORY_EXPORT.md).
 
 To compare a current scan against a prior one (for example, to detect
 new or removed model artifacts since you last looked):
@@ -70,6 +86,11 @@ trustfall scan --local-only          # verify against the cached snapshot, no ne
 Local-only mode is for users who do not want artifact hashes leaving
 the machine. The registry snapshot is signed and verifiable
 independently — see `VERIFYING.md`.
+
+The signed registry grows independently of tool releases. If
+`--refresh` has not been run recently, a cached snapshot can show a
+model as `not_enrolled` that a newer registry would resolve — run
+`trustfall registry --refresh` to update the cached snapshot.
 
 ---
 
@@ -198,6 +219,7 @@ issues), normal GitHub issues are the right path.
 - `VERIFYING.md` — how to verify them independently
 - `LIMITATIONS.md` — what the tool does not claim
 - `PRIVACY.md` — what data is and is not sent
+- `docs/INVENTORY_EXPORT.md` — the `--export` CSV/JSONL schema
 - `SECURITY.md` — how to report security issues
 - `LICENSE` — Apache 2.0
 - `CHANGELOG.md` — version history
