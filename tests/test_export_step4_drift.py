@@ -198,12 +198,12 @@ def _export(results, *, fmt, tmp, include_paths=False, roots=None, ts=_TS):
 
 
 def _csv_rows(p: Path):
-    with p.open() as fh:
+    with p.open(encoding="utf-8") as fh:
         return list(csv.reader(fh))
 
 
 def _jsonl_objs(p: Path):
-    return [json.loads(ln) for ln in p.read_text().splitlines() if ln.strip()]
+    return [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -215,7 +215,7 @@ def _doc_columns() -> list[str]:
     m = re.search(
         r"TRUSTFALL_EXPORT_COLUMNS_V0_4_BEGIN\n(.*?)\n"
         r"TRUSTFALL_EXPORT_COLUMNS_V0_4_END",
-        DOC.read_text(),
+        DOC.read_text(encoding="utf-8"),
         re.S,
     )
     assert m, "canonical column block not found in docs/INVENTORY_EXPORT.md"
@@ -282,7 +282,7 @@ def test_t_tok_7_coverage_reads_no_local_file():
 
 @pytest.mark.parametrize("doc", [DOC, PRIVACY, LIMITATIONS])
 def test_t_tok_6_nonclaim_block_verbatim_in_three_docs(doc):
-    assert TOK6_BLOCK in doc.read_text(), f"§3.4b block missing/altered in {doc.name}"
+    assert TOK6_BLOCK in doc.read_text(encoding="utf-8"), f"§3.4b block missing/altered in {doc.name}"
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -292,7 +292,7 @@ def test_t_tok_6_nonclaim_block_verbatim_in_three_docs(doc):
 
 def test_t_csv_1_default_header_byte_exact(tmp_path):
     out, _ = _export([_result(status=Status.NOT_ENROLLED)], fmt="csv", tmp=tmp_path)
-    first_line = out.read_text().splitlines()[0]
+    first_line = out.read_text(encoding="utf-8").splitlines()[0]
     assert first_line == ",".join(_DEFAULT_15)
 
 
@@ -349,7 +349,7 @@ def test_t_jsonl_1_standalone_objects_no_array(tmp_path):
         _result(status=Status.NOT_ENROLLED, gid="b"),
     ]
     out, n = _export(rs, fmt="jsonl", tmp=tmp_path)
-    text = out.read_text()
+    text = out.read_text(encoding="utf-8")
     assert not text.lstrip().startswith("[")  # no enclosing array
     objs = _jsonl_objs(out)
     assert len(objs) == n == 2
@@ -515,7 +515,7 @@ def test_t_prov_2_manifest_digest_copied_not_recomputed(tmp_path):
 def test_t_prov_3_export_does_not_import_package_root_or_version():
     """trustfall_version is caller-injected; export.py must not import
     the package root or read __version__ itself."""
-    tree = ast.parse((REPO / "src/fallrisk_trustfall/export.py").read_text())
+    tree = ast.parse((REPO / "src/fallrisk_trustfall/export.py").read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             # `from . import __version__` / `from fallrisk_trustfall import ...`
@@ -538,7 +538,7 @@ _FORBIDDEN_IMPORTS = {"api", "httpx", "registry"}
 
 
 def test_t_net_1_dependency_closure_excludes_network():
-    tree = ast.parse((REPO / "src/fallrisk_trustfall/export.py").read_text())
+    tree = ast.parse((REPO / "src/fallrisk_trustfall/export.py").read_text(encoding="utf-8"))
     imported: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -586,7 +586,7 @@ def test_t_net_2_import_allowlist():
         "typing", "__future__", "dataclasses",
     }
     forbidden_std = {"httpx"}
-    tree = ast.parse((REPO / "src/fallrisk_trustfall/export.py").read_text())
+    tree = ast.parse((REPO / "src/fallrisk_trustfall/export.py").read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             if node.level and node.module:  # relative intra-package
@@ -663,7 +663,7 @@ def test_t_root_5b_absent_is_distinct_from_broken(tmp_path, monkeypatch):
 
 
 def test_t_priv_doc_1_no_stale_include_paths_sentence():
-    txt = PRIVACY.read_text()
+    txt = PRIVACY.read_text(encoding="utf-8")
     stale = "`--include-paths` affects local JSON output only"
     assert stale not in txt, (
         "PRIVACY.md still contains the stale, contradicted sentence: "
@@ -677,7 +677,7 @@ def test_t_priv_doc_1_no_stale_include_paths_sentence():
 
 
 def test_t_priv_doc_2_include_vs_export_distinction_present():
-    txt = PRIVACY.read_text()
+    txt = PRIVACY.read_text(encoding="utf-8")
     # --include-paths is documented as an API path-hint / JSON-exposure
     # control (matches live cli.py help line: "Send relative path hints
     # to the API").
@@ -712,7 +712,7 @@ def _ws(s: str) -> str:
 
 
 def test_t_readme_export_network_1_no_unqualified_phrase():
-    txt = README.read_text()
+    txt = README.read_text(encoding="utf-8")
     # The exact stale Quick-Start sentence must be gone, in any wrapping.
     stale = "`--export` writes a local file only — no upload, no network"
     assert stale not in _ws(txt), (
@@ -725,7 +725,7 @@ def test_t_readme_export_network_1_no_unqualified_phrase():
 
 
 def test_t_readme_export_network_2_mode_accurate_language():
-    norm = _ws(README.read_text())
+    norm = _ws(README.read_text(encoding="utf-8"))
     # 1. export adds no upload / additional network behaviour
     assert "adds no upload or additional network behavior" in norm, (
         "README.md must state that --export adds no upload/additional "
@@ -755,7 +755,7 @@ def test_t_readme_export_network_3_clarification_in_schema_docs():
         "the no-per-scan-network mode."
     )
     for doc in (DOC, PRIVACY):
-        assert _ws(clar) in _ws(doc.read_text()), (
+        assert _ws(clar) in _ws(doc.read_text(encoding="utf-8")), (
             f"{doc.name} must carry the scan-mode clarification near its "
             "local-file-write language."
         )
