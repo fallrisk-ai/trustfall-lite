@@ -54,6 +54,8 @@ from .hashing import (
     was_filename_trusted,
 )
 from .models import ModelGroup
+from .export import ExportError, export_inventory
+from .roots import ScanRoot, resolve_scan_roots
 from .registry import (
     DEFAULT_REGISTRY_URL,
     LoadedSnapshot,
@@ -105,6 +107,27 @@ def main() -> None:
     is_flag=True,
     help="Send relative path hints to the API (off by default for privacy).",
 )
+@click.option(
+    "--export",
+    "export_path",
+    type=click.Path(exists=False, path_type=Path),
+    default=None,
+    help=(
+        "Write a flat inventory audit file. Extension selects the format: "
+        ".csv or .jsonl (any other extension exits 70 before scanning). "
+        "Overwrites an existing file. Never contains filesystem paths "
+        "unless --export-include-paths is also passed."
+    ),
+)
+@click.option(
+    "--export-include-paths",
+    is_flag=True,
+    help=(
+        "Include local filesystem paths in the --export file "
+        "(off by default for privacy). Independent of --include-paths, "
+        "which only governs API path hints."
+    ),
+)
 @click.option("--json", "output_json", is_flag=True, help="Emit JSON output.")
 @click.option("--quiet", is_flag=True, help="Suppress progress output.")
 @click.option(
@@ -126,6 +149,8 @@ def scan(
     paths: tuple[Path, ...],
     local_only: bool,
     include_paths: bool,
+    export_path: Path | None,
+    export_include_paths: bool,
     output_json: bool,
     quiet: bool,
     trust_ollama_filenames: bool,
@@ -133,15 +158,91 @@ def scan(
 ) -> None:
     """Scan paths for model artifacts and verify against the registry."""
 
+    # --- 0. Validate --export options BEFORE any scanning ----------
+    # Spec §5 / T-PRIV-4: --export-include-paths without --export is a
+    # usage error (exit 70). Catch it first — it is meaningless without
+    # an export target and must not silently no-op after a full scan.
+    if export_include_paths and export_path is None:
+        _eprint(
+            "error: --export-include-paths requires --export "
+            "(it controls what the export file contains). Nothing was "
+            "scanned."
+        )
+        sys.exit(70)
+
+    # Spec §3.7 / §7: a bad export extension is an export-config error
+    # (exit 70) that must fail fast — before discovery, hashing, or any
+    # network — so the user is not made to wait for a scan that cannot
+    # produce the file they asked for. Empty/garbled extension included.
+    export_fmt: str | None = None
+    if export_path is not None:
+        ext = export_path.suffix.lower()
+        if ext == ".csv":
+            export_fmt = "csv"
+        elif ext == ".jsonl":
+            export_fmt = "jsonl"
+        else:
+            _eprint(
+                f"error: --export path must end in .csv or .jsonl "
+                f"(got {export_path.name!r}). Nothing was scanned."
+            )
+            sys.exit(70)
+
     # --- 1. Build the adapter chain ---------------------------------
     groups = list(_discover_groups(paths))
 
+    # --- 1a. Resolve scan roots (F1, spec §2) — BEFORE no-groups ----
+    # GPT Step-3 blocking patch 3: roots transparency is needed MOST
+    # when the scan finds nothing ("what did we even look at?"). The
+    # roots view must therefore be resolved before the no-groups exit,
+    # not after. Invocation-aware (GPT Step-3 blocking patch 1): when
+    # the user supplied explicit paths, report THOSE; otherwise the
+    # default/env roots. Pure: no network, no hashing, no .discover().
+    scan_roots = _resolve_scan_roots_for_invocation(paths)
+
     if not groups:
+        # F1 transparency on the empty scan. Roots view first (the
+        # answer to "what did we look at?"), then the existing
+        # no-artifacts message / JSON error. --export still produces a
+        # well-formed 0-row inventory so empty scans are pipeline-safe.
         if not output_json:
+            if not quiet:
+                _eprint_scan_roots(scan_roots)
             _eprint("No model artifacts found in the scanned paths.")
             _eprint("Hint: pass a path explicitly, e.g.  trustfall scan ~/.cache/huggingface/hub/")
         else:
-            click.echo(json.dumps({"error": "no model artifacts found"}, indent=2))
+            click.echo(json.dumps({
+                "error": "no model artifacts found",
+                "scan_roots": _scan_roots_as_json(scan_roots),
+            }, indent=2))
+
+        if export_path is not None:
+            assert export_fmt in ("csv", "jsonl")  # §0 guaranteed this
+            scanned_at = _utc_now_iso8601()
+            manifest_digest = _resolve_manifest_digest_for_export()
+            try:
+                n_rows = export_inventory(
+                    [],            # zero groups → header-only CSV / empty JSONL
+                    scan_roots,
+                    fmt=export_fmt,  # type: ignore[arg-type]
+                    out_path=export_path,
+                    include_paths=export_include_paths,
+                    scanned_at=scanned_at,
+                    trustfall_version=__version__,
+                    registry_manifest_digest=manifest_digest,
+                )
+            except ExportError as exc:
+                _eprint(f"error: export failed: {exc}")
+                sys.exit(70)
+            if not quiet:
+                msg = f"Wrote {n_rows} rows to {export_path} ({export_fmt})."
+                if export_include_paths:
+                    msg += (
+                        " [paths INCLUDED — file contains absolute "
+                        "filesystem paths]"
+                    )
+                _eprint(msg)
+
         sys.exit(0)
 
     # --- 1a. Print discovery banner per source ----------------------
@@ -195,6 +296,62 @@ def scan(
     # --- 4. Verify groups -------------------------------------------
     results = verify_groups(hashed_groups, lookup)
 
+    # --- 4a. Roots block → stderr (spec §2.6) -----------------------
+    # scan_roots was resolved BEFORE the no-groups branch (§1a) so the
+    # empty-scan path can also report it (GPT Step-3 patch 3). It is
+    # invocation-aware (GPT Step-3 patch 1): explicit paths report
+    # what was actually scanned, not the default/env roots. Do NOT
+    # re-resolve here — a second resolve_scan_roots() would (a) be
+    # redundant and (b) silently DROP invocation awareness, the exact
+    # disagreement patch 1 fixes.
+    #
+    # stderr so it never contaminates --json stdout or a piped export.
+    # Suppressed by --quiet *and* --json, exactly like the existing
+    # discovery banner above (`if not output_json and not quiet`).
+    # Under --json the scan-roots data is delivered structurally via
+    # the additive §2.7 `scan_roots` key, not as a stderr side-channel.
+    if not output_json and not quiet:
+        _eprint_scan_roots(scan_roots)
+
+    # --- 4c. Export (spec §3/§4) ------------------------------------
+    # Run scalars are injected HERE (the I/O layer), never read inside
+    # export.py: scanned_at from the clock, trustfall_version from the
+    # package, registry_manifest_digest verbatim from the resolved
+    # snapshot (Authority Doctrine — never recomputed; empty if no
+    # snapshot, never fabricated). export.py stays a pure sink.
+    if export_path is not None:
+        assert export_fmt in ("csv", "jsonl")  # §0 guaranteed this
+        scanned_at = _utc_now_iso8601()
+        manifest_digest = _resolve_manifest_digest_for_export()
+        try:
+            n_rows = export_inventory(
+                results,
+                scan_roots,
+                fmt=export_fmt,  # type: ignore[arg-type]
+                out_path=export_path,
+                include_paths=export_include_paths,
+                scanned_at=scanned_at,
+                trustfall_version=__version__,
+                registry_manifest_digest=manifest_digest,
+            )
+        except ExportError as exc:
+            _eprint(f"error: export failed: {exc}")
+            sys.exit(70)
+        # Confirmation → stderr. Spec §5: gated by --quiet ONLY (NOT
+        # --json — line 430 explicitly supports `scan --json --export
+        # inv.csv` simultaneously: JSON on stdout, CSV file, stderr
+        # confirmation). Exact spec wording; path-bearing exports carry
+        # an explicit warning so the user knows before attaching to a
+        # ticket.
+        if not quiet:
+            msg = f"Wrote {n_rows} rows to {export_path} ({export_fmt})."
+            if export_include_paths:
+                msg += (
+                    " [paths INCLUDED — file contains absolute "
+                    "filesystem paths]"
+                )
+            _eprint(msg)
+
     # --- 5. Render output -------------------------------------------
     if output_json:
         _render_json_scan(
@@ -202,6 +359,7 @@ def scan(
             scan_paths=paths,
             include_paths=include_paths,
             trust_ollama_filenames=trust_ollama_filenames,
+            scan_roots=scan_roots,
         )
     else:
         _render_text_scan(results, quiet=quiet)
@@ -679,6 +837,203 @@ def diff(
 # ════════════════════════════════════════════════════════════════════
 
 
+def _utc_now_iso8601() -> str:
+    """
+    `scanned_at` run-scalar source. Generated HERE in the I/O layer —
+    never inside export.py — so the pure sink stays clock-free and
+    deterministic (T-DET-1 / T-PROV-3). Second-resolution UTC Zulu.
+    """
+    import datetime as _dt
+
+    return (
+        _dt.datetime.now(_dt.timezone.utc)
+        .replace(microsecond=0)
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+
+
+def _resolve_manifest_digest_for_export() -> str:
+    """
+    `registry_manifest_digest` run-scalar source (spec §3.4c, v2.1.1).
+
+    Primary symbol: `registry.LoadedSnapshot.manifest_digest`. Returned
+    VERBATIM — no prefix added, none stripped, never recomputed
+    (Trustfall API Authority Doctrine). export.py never imports
+    registry.py; the CLI resolves the value and injects it.
+
+    No local snapshot → empty string. The export still succeeds with an
+    empty digest column. Fabricating or recomputing a digest the issuer
+    did not sign is the exact failure class the Authority Doctrine
+    forbids; an honest empty value is correct.
+    """
+    sp = snapshot_path()
+    if not sp.is_file():
+        return ""
+    try:
+        snap = load_snapshot()
+    except SnapshotError:
+        return ""
+    return snap.manifest_digest
+
+
+def _collapse_home(path: str | None) -> str | None:
+    """Render-boundary home-collapse (roots.py keeps full paths)."""
+    if path is None:
+        return None
+    home = str(Path.home())
+    if path == home or path.startswith(home + os.sep):
+        return "~" + path[len(home):]
+    return path
+
+
+def _classify_explicit_scan_path(p: Path) -> str:
+    """
+    THE single explicit-path classifier (GPT Step-3 re-review blocker).
+
+    Returns "ollama" | "hf_cache" | "path". This is the ONE rule both
+    the roots-transparency view (_resolve_scan_roots_for_invocation)
+    and the adapter dispatch (_discover_groups) consume — so the
+    displayed roots can never disagree with the adapter that actually
+    ran. Duplicating this logic is the exact Step-1 failure class
+    (display says one thing, discovery does another); a prior revision
+    had two copies that *also* differed in crash-safety (the helper
+    guarded the iterdir() probe, discovery did not — an unreadable
+    explicit dir crashed the whole scan before roots transparency
+    could matter). One classifier closes both holes.
+
+    Detection order (must match historical _discover_groups order):
+      1. non-existing or non-dir            → path
+      2. dir + manifests/registry.ollama.ai → ollama
+      3. dir + any models--* child          → hf_cache
+      4. OSError/PermissionError on iterdir  → path  (crash-safe:
+         a dir we cannot introspect degrades to the generic path
+         walk, exactly the PathAdapter fallback this returns)
+      5. otherwise                           → path
+    """
+    ep = p.expanduser()
+    if not ep.exists() or not ep.is_dir():
+        return "path"
+    if (ep / "manifests" / "registry.ollama.ai").is_dir():
+        return "ollama"
+    try:
+        has_hf = any(
+            child.name.startswith("models--")
+            for child in ep.iterdir()
+            if child.is_dir()
+        )
+    except OSError:
+        return "path"
+    return "hf_cache" if has_hf else "path"
+
+
+def _resolve_scan_roots_for_invocation(
+    paths: tuple[Path, ...],
+) -> list[ScanRoot]:
+    """
+    Invocation-aware scan-root resolution (GPT Step-3 blocking patch 1).
+
+    `resolve_scan_roots()` enumerates the *default/env* roots only and
+    deliberately has no `path` ecosystem (Step-1 doctrine: a `path`
+    root is a CLI argument, not abstractly resolvable). That is correct
+    for the no-paths default scan. But when the user supplies explicit
+    paths, the roots block / JSON `scan_roots` must report *what was
+    actually scanned*, not the unrelated default roots — otherwise the
+    F1 promise ("show me what the scanner looked at") is broken.
+
+    No paths  → delegate to resolve_scan_roots() unchanged (default
+                roots; Step-1 doctrine intact, zero behavior change).
+    Paths     → classify each explicit path with the SHARED classifier
+                `_classify_explicit_scan_path`, the SAME function
+                `_discover_groups` consumes for adapter dispatch. One
+                classifier means the reported roots can never disagree
+                with the adapter that actually ran (the Step-1
+                display-≠-dispatch invariant). Crash-safety on an
+                unreadable dir lives in that shared classifier, so the
+                roots view and discovery degrade identically by
+                construction — not by a duplicated, separately-hardened
+                copy (the GPT Step-3 re-review blocker).
+    """
+    if not paths:
+        return resolve_scan_roots()
+
+    out: list[ScanRoot] = []
+    for p in paths:
+        ep = p.expanduser()
+        exists = ep.exists()
+        try:
+            resolved = str(ep.resolve())
+        except (OSError, RuntimeError):
+            resolved = str(ep)
+
+        ecosystem = _classify_explicit_scan_path(ep)
+
+        out.append(
+            ScanRoot(
+                ecosystem=ecosystem,
+                resolved_path=resolved,
+                exists=exists,
+                scanned=exists,
+                env_override=None,
+                note=(
+                    "explicit path"
+                    if exists
+                    else "explicit path does not exist"
+                ),
+            )
+        )
+    return out
+
+
+def _eprint_scan_roots(scan_roots: list[ScanRoot]) -> None:
+    """
+    F1 scan-roots block → stderr (spec §2.6).
+
+    stderr, never stdout: it must not contaminate --json output or a
+    piped export. Suppressed by --quiet at the call site, exactly like
+    the discovery banner. Home-collapse is applied HERE at the
+    rendering boundary (roots.py deliberately keeps full paths).
+    """
+    _eprint("Scan roots:")
+    for sr in scan_roots:
+        disp = _collapse_home(sr.resolved_path)
+        if sr.resolved_path is None:
+            state = "not found"
+        elif sr.scanned:
+            state = "scanned"
+        elif sr.exists:
+            state = "detected (not scanned)"
+        else:
+            state = "configured but missing"
+        line = f"  {sr.ecosystem}: {disp if disp is not None else '(none)'} [{state}]"
+        if sr.env_override:
+            line += f" (via {sr.env_override})"
+        _eprint(line)
+        if sr.note:
+            _eprint(f"    note: {sr.note}")
+
+
+def _scan_roots_as_json(scan_roots: list[ScanRoot]) -> list[dict[str, Any]]:
+    """
+    Additive `scan_roots` key for `trustfall scan --json` (spec §2.7).
+
+    Home-collapse applied at this rendering boundary, consistent with
+    the stderr block and with the existing `scan_paths` privacy stance.
+    Carries the full ScanRoot truth surface so JSON consumers can
+    distinguish absent / configured-but-broken / detected-not-scanned.
+    """
+    return [
+        {
+            "ecosystem": sr.ecosystem,
+            "resolved_path": _collapse_home(sr.resolved_path),
+            "exists": sr.exists,
+            "scanned": sr.scanned,
+            "env_override": sr.env_override,
+            "note": sr.note,
+        }
+        for sr in scan_roots
+    ]
+
+
 def _eprint(msg: str) -> None:
     click.echo(msg, err=True)
 
@@ -727,22 +1082,19 @@ def _discover_groups(paths: tuple[Path, ...]) -> list[ModelGroup]:
             _eprint(f"warning: path does not exist: {p}")
             continue
 
-        # Ollama root detection: presence of manifests/registry.ollama.ai/
-        if p.is_dir() and (p / "manifests" / "registry.ollama.ai").is_dir():
+        # Single explicit-path classifier — the SAME function the
+        # roots-transparency view consumes. One rule, so display can
+        # never disagree with dispatch, and the unreadable-dir crash
+        # (previously unguarded HERE) is handled inside the classifier
+        # (degrades to the PathAdapter generic walk). GPT Step-3
+        # re-review blocker.
+        kind = _classify_explicit_scan_path(p)
+        if kind == "ollama":
             groups.extend(OllamaAdapter(models_root=p).discover())
-            continue
-
-        # HF cache root detection: presence of models--*/ children
-        if p.is_dir() and any(
-            child.name.startswith("models--")
-            for child in p.iterdir()
-            if child.is_dir()
-        ):
+        elif kind == "hf_cache":
             groups.extend(HFCacheAdapter(roots=[p]).discover())
-            continue
-
-        # Fallback: generic path walk
-        groups.extend(PathAdapter([p]).discover())
+        else:
+            groups.extend(PathAdapter([p]).discover())
     return groups
 
 
@@ -1034,6 +1386,7 @@ def _build_scan_report_dict(
     scan_paths: tuple[Path, ...],
     include_paths: bool,
     trust_ollama_filenames: bool = False,
+    scan_roots: list[ScanRoot] | None = None,
 ) -> dict[str, Any]:
     """Build the v0.2 JSON scan-output dict.
 
@@ -1165,6 +1518,15 @@ def _build_scan_report_dict(
         "trust_ollama_filenames": trust_ollama_filenames,
         "summary": summary,
         "groups": detailed_groups,
+        # Additive F1 surface (spec §2.7). Present ONLY when the caller
+        # supplied scan_roots — the `diff` implicit-current path passes
+        # None, so its JSON shape is byte-unaffected. Home-collapse is
+        # applied at this rendering boundary (roots.py keeps full paths).
+        **(
+            {"scan_roots": _scan_roots_as_json(scan_roots)}
+            if scan_roots is not None
+            else {}
+        ),
     }
 
 
@@ -1173,6 +1535,7 @@ def _render_json_scan(
     scan_paths: tuple[Path, ...],
     include_paths: bool,
     trust_ollama_filenames: bool = False,
+    scan_roots: list[ScanRoot] | None = None,
 ) -> None:
     """Render the v0.2 JSON scan output to stdout.
 
@@ -1180,13 +1543,15 @@ def _render_json_scan(
     compat with the existing scan-command call site; the dict-
     building logic now lives in `_build_scan_report_dict` so the
     diff command can invoke implicit-current scans without going
-    through stdout/stdin.
+    through stdout/stdin. `scan_roots` is additive (spec §2.7) —
+    forwarded only when supplied.
     """
     output = _build_scan_report_dict(
         results,
         scan_paths=scan_paths,
         include_paths=include_paths,
         trust_ollama_filenames=trust_ollama_filenames,
+        scan_roots=scan_roots,
     )
     click.echo(json.dumps(output, indent=2))
 
